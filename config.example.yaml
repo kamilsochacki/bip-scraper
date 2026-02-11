@@ -1,0 +1,36 @@
+# Konfiguracja scrapera BIP – skopiuj do config.yaml i uzupełnij
+
+# Źródła BIP – rejestry zmian (powiat kamieński i gminy)
+sources:
+  - name: "BIP Gmina Wolin"
+    list_url: "https://bip.gminawolin.pl/rejestr-zmian"
+    rejestr_zmian: true
+    max_entries: 20
+
+  - name: "BIP Gmina Dziwnów"
+    list_url: "https://bip.dziwnow.pl/rejestr-zmian"
+    rejestr_zmian: true
+    max_entries: 20
+
+  - name: "BIP Powiat Kamieński"
+    list_url: "https://bip.powiatkamienski.pl/rejestr-zmian"
+    rejestr_zmian: true
+    max_entries: 20
+
+# Analiza i artykuł – lokalnie przez Ollama (model Bielik)
+ollama:
+  base_url: "http://localhost:11434"
+  # Pełna nazwa z ollama ps (np. SpeakLeash/bielik-11b-v2.3-instruct:Q4_K_M)
+  model: "SpeakLeash/bielik-11b-v2.3-instruct:Q4_K_M"
+  timeout: 300
+
+# Opcjonalnie: wysyłka do zewnętrznego agenta (gdy nie używasz --ollama)
+agent:
+  webhook_url: ""
+  api_key: ""
+  api_key_header: "Authorization"
+
+# Scraper
+scraper:
+  request_timeout: 15
+  user_agent: "BIP-Scraper/1.0 (Python; lokalny zbieracz informacji publicznych)"
