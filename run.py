@@ -29,6 +29,7 @@ from bip_scraper.sender import build_payload, save_payload_to_file, send_to_agen
 from bip_scraper.ollama_client import (
     analyze_for_residents,
     generate_wordpress_article,
+    extract_facts,
 )
 
 
@@ -45,6 +46,8 @@ def main() -> int:
         action="store_true",
         help="Scrape → analiza Bielik (Ollama) → generowanie artykułu WordPress lokalnie",
     )
+    parser.add_argument("--model-extractor", help="Model do ekstrakcji faktów (np. mistral)")
+    parser.add_argument("--model-writer", help="Model do pisania artykułu (np. SpeakLeash/bielik-11b-v2.3-instruct:Q4_K_M)")
     args = parser.parse_args()
 
     try:
@@ -73,22 +76,43 @@ def main() -> int:
     if args.ollama:
         ollama_cfg = config.get("ollama") or {}
         base_url = ollama_cfg.get("base_url") or "http://localhost:11434"
-        model = ollama_cfg.get("model") or "SpeakLeash/bielik-11b-v2.3-instruct:Q4_K_M"
+        
+        # Default strategy: Single stage (Bielik only)
+        # If --model-extractor is set, switch to Two-Stage (Extraction -> Synthesis)
+        model_writer = args.model_writer or ollama_cfg.get("model") or "SpeakLeash/bielik-11b-v2.3-instruct:Q4_K_M"
+        model_extractor = args.model_extractor or ollama_cfg.get("model_extractor")
+        
         timeout = ollama_cfg.get("timeout") or 300
         out_path = args.output or "artykul.html"
 
         try:
-            print("Analiza wpisów (Bielik) – wybór tego, co interesujące dla mieszkańców...", file=sys.stderr)
-            analiza = analyze_for_residents(entries, base_url=base_url, model=model, timeout=timeout)
-            print("Generowanie artykułu WordPress (Bielik)...", file=sys.stderr)
-            artykul = generate_wordpress_article(analiza, base_url=base_url, model=model, timeout=timeout)
+            if model_extractor:
+                # Two-Stage Pipeline
+                print(f"I ETAP: Ekstrakcja faktów (Model: {model_extractor})...", file=sys.stderr)
+                # Note: chunk_size=5 ensures we don't overload the extractor's context either, 
+                # although Mistral/Llama usually have 8k-128k context.
+                facts = extract_facts(entries, base_url=base_url, model=model_extractor, timeout=timeout)
+                
+                if not facts:
+                    print("Ekstrakcja faktów zwróciła pusty wynik. Przerywam.", file=sys.stderr)
+                    return 1
+
+                print(f"II ETAP: Generowanie artykułu (Model: {model_writer})...", file=sys.stderr)
+                artykul = generate_wordpress_article(facts, base_url=base_url, model=model_writer, timeout=timeout)
+            else:
+                # Legacy Single Stage
+                print(f"Analiza jednoetapowa (Model: {model_writer})...", file=sys.stderr)
+                analiza = analyze_for_residents(entries, base_url=base_url, model=model_writer, timeout=timeout)
+                print("Generowanie artykułu WordPress...", file=sys.stderr)
+                artykul = generate_wordpress_article(analiza, base_url=base_url, model=model_writer, timeout=timeout)
+                
         except requests.exceptions.RequestException as e:
             print(f"Błąd połączenia z Ollama ({base_url}): {e}", file=sys.stderr)
             if getattr(e, "response") and e.response is not None and e.response.status_code == 404:
                 print("Endpoint nie znaleziony (404). Sprawdź: curl -s http://localhost:11434/api/tags", file=sys.stderr)
                 print("Jeśli port 11434 jest zajęty przez inną usługę, zatrzymaj ją i uruchom Ollamę (ollama serve).", file=sys.stderr)
             else:
-                print("Upewnij się, że Ollama działa (ollama serve) i model Bielik jest pobrany (ollama pull SpeakLeash/bielik-11b-v2.3-instruct:Q4_K_M).", file=sys.stderr)
+                print("Upewnij się, że Ollama działa (ollama serve) i modele są pobrane.", file=sys.stderr)
             return 1
 
         if out_path == "-":

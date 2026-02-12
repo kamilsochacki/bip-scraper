@@ -13,7 +13,14 @@ from .scraper import BIPEntry
 def _ollama_generate_legacy(base_url: str, model: str, prompt: str, system: str | None, stream: bool, timeout: int) -> str:
     """POST /api/generate (klasyczne API Ollama)."""
     root = base_url.rstrip("/")
-    payload: dict[str, Any] = {"model": model, "prompt": prompt, "stream": stream}
+    payload: dict[str, Any] = {
+        "model": model, 
+        "prompt": prompt, 
+        "stream": stream,
+        "options": {
+            "num_ctx": 16384
+        }
+    }
     if system:
         payload["system"] = system
     r = requests.post(f"{root}/api/generate", json=payload, timeout=timeout)
@@ -30,7 +37,14 @@ def _ollama_chat(base_url: str, model: str, prompt: str, system: str | None, str
     messages.append({"role": "user", "content": prompt})
     r = requests.post(
         f"{root}/api/chat",
-        json={"model": model, "messages": messages, "stream": stream},
+        json={
+            "model": model, 
+            "messages": messages, 
+            "stream": stream,
+            "options": {
+                "num_ctx": 16384
+            }
+        },
         timeout=timeout,
     )
     r.raise_for_status()
@@ -55,7 +69,18 @@ def ollama_generate(
         return _ollama_generate_legacy(base_url, model, prompt, system, stream, timeout)
     except requests.exceptions.HTTPError as e:
         if e.response is not None and e.response.status_code == 404:
+            # Log the error from /api/generate (e.g., "model not found")
+            try:
+                err_msg = e.response.json().get("error", e.response.text)
+                print(f"WARN: /api/generate returned 404: {err_msg}. Trying /api/chat fallback...", file=sys.stderr)
+            except Exception:
+                print(f"WARN: /api/generate returned 404. Trying /api/chat fallback...", file=sys.stderr)
+            
             return _ollama_chat(base_url, model, prompt, system, stream, timeout)
+        
+        # Re-raise other errors (500, etc.)
+        if e.response is not None:
+             print(f"ERROR: Ollama API returned {e.response.status_code}: {e.response.text}", file=sys.stderr)
         raise
 
 
@@ -172,6 +197,77 @@ def analyze_for_residents(
             combined_analysis.append(f"--- CZĘŚĆ {i} (BŁĄD) ---\n")
 
     return "\n\n".join(combined_analysis)
+
+
+SYSTEM_EXTRACTION = """Jesteś analitykiem danych. Twoim zadaniem jest wyciągnięcie suchych faktów z tekstu w formacie JSON.
+Nie interpretuj przedwcześnie, nie pisz esejów. Interesują nas:
+- Daty (terminy składania ofert, spotkań, wydarzeń)
+- Kwoty (budżet, cena, wadium)
+- Numery (działek, uchwał, dróg)
+- Cel/Temat (np. sprzedaż działki, remont drogi, sesja rady)
+Jeśli tekst to błąd OCR lub bełkot -> POMIŃ CAŁKOWICIE."""
+
+PROMPT_EXTRACTION = """Przeanalizuj poniższe wpisy BIP (w tym treść załączników).
+Dla każdego wpisu, który zawiera konkretne informacje (inwestycje, prawo, finanse), wygeneruj obiekt JSON w liście.
+
+Format wyjściowy (tylko JSON, bez markdowna):
+[
+  {{
+    "tytul": "Skrócony tytuł",
+    "fakt": "Krótki opis co się dzieje (np. Przetarg na X)",
+    "szczegoly": "Kluczowe dane: 200 tys. zł, działka 123/4, termin do 15.05",
+    "zrodlo": "Nazwa źródła"
+  }}
+]
+
+Jeśli wpis jest nieistotny lub błędem OCR -> nie dodawaj go do listy.
+
+WPISY:
+{tekst_wpisow}
+"""
+
+def extract_facts(
+    entries: list[BIPEntry],
+    base_url: str = "http://localhost:11434",
+    model: str = "mistral",
+    timeout: int = 300,
+    chunk_size: int = 5,
+) -> str:
+    """
+    Etap 1: Ekstrakcja faktów.
+    Korzysta z lekkiego modelu (Mistral/Llama) do wyciągnięcia konkretów z szumu OCR.
+    Zwraca zagregowaną listę faktów (tekst JSON-like).
+    """
+    batches = chunk_entries(entries, chunk_size)
+    combined_facts = []
+    
+    print(f"Ekstrakcja faktów w {len(batches)} częściach (model: {model})...")
+
+    for i, batch in enumerate(batches, 1):
+        print(f"  -> Ekstrakcja części {i}/{len(batches)}...")
+        tekst = entries_to_text(batch)
+        prompt = PROMPT_EXTRACTION.format(tekst_wpisow=tekst)
+        
+        try:
+            # Wymuszamy format JSON jeśli model to obsługuje, ale tekstowo też ok
+            response = ollama_generate(
+                base_url,
+                model,
+                prompt,
+                system=SYSTEM_EXTRACTION,
+                stream=False,
+                timeout=timeout,
+            )
+            combined_facts.append(response)
+        except Exception as e:
+            print(f"Błąd ekstrakcji części {i}: {e}")
+
+    
+    if not combined_facts:
+        print("BŁĄD: Ekstrakcja faktów zakończyła się niepowodzeniem (pusta lista).", file=sys.stderr)
+        return ""
+        
+    return "\n".join(combined_facts)
 
 
 def generate_wordpress_article(
