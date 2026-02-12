@@ -13,6 +13,9 @@ from bs4 import BeautifulSoup
 
 
 import io
+import sys
+import pytesseract
+from pdf2image import convert_from_bytes
 from pypdf import PdfReader
 
 @dataclass
@@ -152,7 +155,108 @@ def fetch_rejestr_zmian(
     seen: set[str] = set()
 
     # 1) Tabela rejestru zmian (np. powiat kamienski: Zmieniono | Tytuł | Użytkownik | Informacja)
-    for table in soup.find_all("table"):
+    tables = soup.find_all("table")
+    
+    # Check if tables are empty (generic DataTables structure often has empty table in HTML)
+    is_empty_table = True
+    if tables:
+        for table in tables:
+            if table.find("tbody") and table.find("tbody").find("tr"):
+                is_empty_table = False
+                break
+            # Also check if table has rows directly (invalid HTML but possible)
+            if table.find("tr") and not table.find("thead"):
+                is_empty_table = False
+                break
+
+    if not tables or is_empty_table:
+        # Try to find DataTables AJAX configuration
+        import re
+        import json
+        
+        # Look for script containing .DataTable and ajax
+        scripts = soup.find_all("script")
+        ajax_url = None
+        for script in scripts:
+            if script.string and ".DataTable" in script.string and "ajax" in script.string:
+                match = re.search(r'"ajax":\s*"([^"]+)"', script.string)
+                if match:
+                    ajax_url = match.group(1)
+                    break
+        
+        if ajax_url:
+            print(f"DEBUG: Found DataTables AJAX URL: {ajax_url}", file=sys.stderr)
+            # Construct full URL
+            if ajax_url.startswith("/"):
+                from urllib.parse import urlparse
+                parsed_list_url = urlparse(list_url)
+                full_ajax_url = f"{parsed_list_url.scheme}://{parsed_list_url.netloc}{ajax_url}"
+            else:
+                full_ajax_url = ajax_url # Assume absolute or relative to base?? Usually absolute path from root
+            
+            try:
+                # Fetch JSON
+                headers = {"User-Agent": user_agent} if user_agent else {}
+                headers["X-Requested-With"] = "XMLHttpRequest"
+                headers["Referer"] = list_url
+                
+                print(f"DEBUG: Fetching AJAX data from {full_ajax_url}", file=sys.stderr)
+                resp = requests.get(full_ajax_url, headers=headers, timeout=timeout)
+                resp.raise_for_status()
+                data = resp.json()
+                
+                rows = []
+                if 'data' in data:
+                    rows = data['data']
+                elif 'aaData' in data:
+                    rows = data['aaData']
+                
+                for row in rows:
+                    if len(entries) >= max_entries:
+                        break
+                    
+                    # Mapping based on observation of bip.gminawolin.pl / bip.dziwnow.pl
+                    # '0': Title (HTML or Text), '1': Module, '2': Type, '3': Date, '4': Author
+                    # Keys might be integers or strings of integers
+                    
+                    raw_title = row.get('0') or row.get(0)
+                    date_str = row.get('3') or row.get(3) or ""
+                    author = row.get('4') or row.get(4) or ""
+                    
+                    if raw_title:
+                        # Check for link in title
+                        title_soup = BeautifulSoup(str(raw_title), "html.parser")
+                        link = title_soup.find("a")
+                        if link and link.get("href"):
+                            title_text = link.get_text(strip=True)
+                            href = link.get("href").replace("\\", "/")
+                            if href.startswith("/"):
+                                parsed_list_url = urlparse(list_url)
+                                entry_url = f"{parsed_list_url.scheme}://{parsed_list_url.netloc}{href}"
+                            else:
+                                entry_url = href
+                        else:
+                            title_text = title_soup.get_text(strip=True) or str(raw_title)
+                            entry_url = list_url # Fallback if no specific link
+                        
+                        entry = BIPEntry(
+                            title=title_text,
+                            url=entry_url,
+                            published=str(date_str),
+                            source_name=source_name,
+                            summary=f"Data: {date_str}. Autor: {author}",
+                            content=f"Log: {title_text}. Autor: {author}. Data: {date_str}",
+                            attachments=[]
+                        )
+                        entries.append(entry)
+                
+                if entries:
+                    return entries
+
+            except Exception as e:
+                print(f"ERROR fetching/parsing AJAX DataTables: {e}", file=sys.stderr)
+
+    for table in tables:
         for row in table.find_all("tr"):
             cells = row.find_all(["td", "th"])
             if not cells:
@@ -364,7 +468,8 @@ def fetch_source(
 
 
 def extract_text_from_pdf(pdf_content: bytes) -> str:
-    """Wyciąga tekst z pliku PDF (używając pypdf)."""
+    """Ekstrakcja tekstu z PDF (pypdf). Jeśli pusto, próba OCR (tesseract via pdf2image)."""
+    text = ""
     try:
         reader = PdfReader(io.BytesIO(pdf_content))
         text_parts = []
@@ -372,9 +477,30 @@ def extract_text_from_pdf(pdf_content: bytes) -> str:
             extracted = page.extract_text()
             if extracted:
                 text_parts.append(extracted)
-        return "\n".join(text_parts).strip()
+        text = "\n".join(text_parts).strip()
     except Exception as e:
-        return f"[Błąd odczytu PDF: {str(e)}]"
+        print(f"Błąd pypdf: {e}", file=sys.stderr)
+
+    # Fallback OCR jeśli tekstu jest bardzo mało (np. skan)
+    if len(text) < 50:
+        print("Mało tekstu w PDF (skan?), uruchamiam OCR (tesseract)...", file=sys.stderr)
+        try:
+            # Konwersja PDF do obrazów (wymaga poppler w systemie)
+            images = convert_from_bytes(pdf_content)
+            ocr_text = ""
+            for image in images:
+                # Opcjonalnie: lang='pol' lub 'pol+eng'
+                page_text = pytesseract.image_to_string(image, lang='pol+eng')
+                ocr_text += page_text + "\n"
+            
+            if len(ocr_text.strip()) > len(text):
+                 text = ocr_text
+        except Exception as e:
+            print(f"Błąd OCR: {e}", file=sys.stderr)
+            if not text:
+                return f"[Błąd odczytu PDF i OCR: {str(e)}]"
+
+    return text
 
 
 def fetch_entry_details(
@@ -440,10 +566,10 @@ def fetch_entry_details(
                         "size": len(file_resp.content)
                     })
             except Exception as e:
-                print(f"Błąd pobierania załącznika {full_url}: {e}")
+                print(f"Błąd pobierania załącznika {full_url}: {e}", file=sys.stderr)
 
     except Exception as e:
-        print(f"Błąd fetch_entry_details dla {entry.url}: {e}")
+        print(f"Błąd fetch_entry_details dla {entry.url}: {e}", file=sys.stderr)
 
 
 def run_scraper(config: dict) -> list[BIPEntry]:
@@ -459,15 +585,15 @@ def run_scraper(config: dict) -> list[BIPEntry]:
             entries = fetch_source(src, timeout=timeout, user_agent=user_agent)
             
             # Dla każdego wpisu pobieramy szczegóły (załączniki)
-            print(f"Pobieranie szczegółów dla źródła {src.get('name')}... ({len(entries)} wpisów)")
+            print(f"Pobieranie szczegółów dla źródła {src.get('name')}... ({len(entries)} wpisów)", file=sys.stderr)
             for e in entries:
                 try:
                     fetch_entry_details(e, timeout=timeout, user_agent=user_agent)
                 except Exception as err:
-                    print(f"Błąd pobierania szczegółów {e.url}: {err}")
+                    print(f"Błąd pobierania szczegółów {e.url}: {err}", file=sys.stderr)
             
             all_entries.extend(entries)
         except Exception as e:
             # Loguj i idź dalej
-            print(f"Błąd źródła {src.get('name', '?')}: {e}")
+            print(f"Błąd źródła {src.get('name', '?')}: {e}", file=sys.stderr)
     return all_entries
