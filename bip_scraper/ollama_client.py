@@ -144,9 +144,10 @@ Struktura:
    - Opisz kolejne tematy, grupując je logicznie (np. "Inwestycje i przetargi", "Sprawy urzędowe").
    - Używaj konkretów (daty, numery działek, nazwy ulic) jeśli były w analizie.
    - Jeśli analiza wspomina o załączniku, napisz "Szczegóły w załączniku na stronie BIP".
+   - Przy każdym temacie (lub na końcu sekcji) dodaj link "Zobacz w BIP" kierujący do źródła (jeśli URL jest dostępny w analizie).
 4. Zakończenie: Link do źródeł (ogólne odesłanie do BIP).
 
-Format HTML (używaj <h3> dla nagłówków sekcji, <p> dla treści, <ul>/<li> dla wyliczeń).
+Format HTML (używaj <h3> dla nagłówków sekcji, <p> dla treści, <ul>/<li> dla wyliczeń, <a href="..."> dla linków).
 
 ---
 ANALIZA WPISÓW:
@@ -216,7 +217,8 @@ Format wyjściowy (tylko JSON, bez markdowna):
     "tytul": "Skrócony tytuł",
     "fakt": "Krótki opis co się dzieje (np. Przetarg na X)",
     "szczegoly": "Kluczowe dane: 200 tys. zł, działka 123/4, termin do 15.05",
-    "zrodlo": "Nazwa źródła"
+    "zrodlo": "Nazwa źródła",
+    "url": "Pełny link do wpisu (przepisany z wejścia)"
   }}
 ]
 
