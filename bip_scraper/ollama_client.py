@@ -69,39 +69,65 @@ def entries_to_text(entries: list[BIPEntry], max_title_len: int = 120) -> str:
             lines.append(f"   Data: {e.published}")
         if e.summary:
             lines.append(f"   Skrót: {e.summary[:200]}...")
+        
+        if e.attachments:
+            lines.append("   ZAŁĄCZNIKI (PDF):")
+            for att in e.attachments:
+                name = att.get("name", "Plik")
+                # Skracamy treść załącznika, by nie przepełnić promptu
+                content = (att.get("text_content") or "").strip()
+                if content:
+                    # Wycinamy białe znaki i bierzemy fragment
+                    snippet = " ".join(content.split())[:800]
+                    lines.append(f"     -> {name}: {snippet}...")
+        
         lines.append("")
     return "\n".join(lines)
 
 
-SYSTEM_ANALIZA = """Jesteś ekspertem od informacji publicznych (BIP). Twoim zadaniem jest wybór informacji istotnych dla mieszkańców powiatu (gminy, miasta). Zwracaj uwagę na: uchwały i zarządzenia wpływające na codzienne życie, przetargi i zamówienia publiczne, konsultacje społeczne, obwieszczenia, zmiany w prawie miejscowym, nabory na stanowiska, sprawy środowiska i planowania. Pomijaj wewnętrzne procedury, czysto techniczne zmiany i powtórzenia."""
+SYSTEM_ANALIZA = """Jesteś ekspertem od informacji publicznych (BIP). Twoim zadaniem jest wybór informacji istotnych dla mieszkańców powiatu (gminy, miasta). 
+Opieraj się WYŁĄCZNIE na dostarczonym tekście, w tym na treści ZAŁĄCZNIKÓW (PDF). Nie wymyślaj faktów, dat ani kwot. Jeśli czegoś nie ma w tekście, nie pisz o tym.
+Zwracaj uwagę na: uchwały i zarządzenia wpływające na codzienne życie, przetargi i zamówienia publiczne (szczegóły w załącznikach), konsultacje społeczne, obwieszczenia, zmiany w prawie miejscowym.
+Pomijaj wewnętrzne procedury, czysto techniczne zmiany i powtórzenia."""
 
-PROMPT_ANALIZA = """Poniżej lista wpisów z rejestrów zmian kilku BIP-ów (Biuletynów Informacji Publicznych) z powiatu kamieńskiego.
+PROMPT_ANALIZA = """Poniżej lista wpisów z rejestrów zmian kilku BIP-ów. Część wpisów zawiera sekcję "ZAŁĄCZNIKI (PDF)" z wyciągniętą treścią dokumentów.
 
-Wybierz te wpisy, które mogą **interesować mieszkańców powiatu** (np. uchwały, zarządzenia, przetargi, obwieszczenia, konsultacje społeczne, nabory, inwestycje). Dla każdego wybranego wpisu podaj:
-- krótki tytuł / temat (jedna linia),
-- dlaczego to może być ważne dla mieszkańca (jedno-dwa zdania).
+Przeanalizuj dokładnie tytuły oraz treść załączników. Wybierz te wpisy, które są ważne dla mieszkańców (np. inwestycje, podatki, utrudnienia, ważne terminy).
 
-Pomijaj wpisy czysto wewnętrzne, techniczne lub mało istotne.
+Dla każdego wybranego wpisu podaj:
+1. Konkretny tytuł/temat (np. "Przetarg na remont ulicy X", "Konsultacje w sprawie Y").
+2. Kluczowe szczegóły znaleziona w załącznikach (np. termin składania ofert, kwota, data spotkania, numer działki).
+3. Dlaczego to ważne dla mieszkańca.
+
+Jeśli wpis jest techniczną zmianą w BIP bez znaczenia dla ogółu -> POMIŃ GO.
 
 ---
 {tekst_wpisow}
 ---
-Odpowiedz w formie listy (numeracja). Tylko wybrane wpisy."""
+Odpowiedz w formie listy punktowanej. Pisz zwięźle i konkretnie. Nie halucynuj."""
 
-SYSTEM_ARTYKUL = """Jesteś redaktorem serwisu informacyjnego dla mieszkańców powiatu. Piszesz zwięzłe, zrozumiałe artykuły na podstawie informacji z BIP. Styl: neutralny, rzeczowy, bez żargonu prawniczego tam gdzie to możliwe."""
+SYSTEM_ARTYKUL = """Jesteś rzetelnym dziennikarzem lokalnym. Piszesz artykuł na podstawie dostarczonej analizy. 
+Twoim priorytetem jest prawda i konkret. Nie dodawaj "upiększaczy" ani zmyślonych opinii mieszkańców. 
+Opieraj się na faktach z analizy (daty, nazwy, kwoty). Styl: informacyjny, prosty, zrozumiały."""
 
-PROMPT_ARTYKUL = """Na podstawie poniższej analizy wpisów z BIP przygotuj **jeden artykuł** do publikacji na stronie WordPress.
+PROMPT_ARTYKUL = """Na podstawie poniższej analizy wpisów z BIP przygotuj artykuł do publikacji.
 
-Wymagania:
-- **Tytuł** – jeden, przyciągający uwagę (np. „Co nowego w BIP-ach powiatu? Uchwały, przetargi i konsultacje”).
-- **Lead** – 2–4 zdania podsumowujące najważniejsze informacje.
-- **Treść** – krótkie akapity (możesz użyć nagłówków <h3>), z linkami do źródeł BIP tam gdzie to sensowne. Format HTML dopasowany do WordPress (prosty HTML: <p>, <h3>, <a>, <ul>/<li>).
-- Na końcu krótka zachęta do sprawdzenia pełnych informacji w BIP (np. „Szczegóły w Biuletynach Informacji Publicznej poszczególnych gmin i starostwa.”).
+Struktura:
+1. Chwytliwy, ale prawdziwy tytuł.
+2. Lead (wstęp) streszczający najważniejsze newsy (maks 3-4 zdania).
+3. Rozwinięcie:
+   - Opisz kolejne tematy, grupując je logicznie (np. "Inwestycje i przetargi", "Sprawy urzędowe").
+   - Używaj konkretów (daty, numery działek, nazwy ulic) jeśli były w analizie.
+   - Jeśli analiza wspomina o załączniku, napisz "Szczegóły w załączniku na stronie BIP".
+4. Zakończenie: Link do źródeł (ogólne odesłanie do BIP).
+
+Format HTML (używaj <h3> dla nagłówków sekcji, <p> dla treści, <ul>/<li> dla wyliczeń).
 
 ---
+ANALIZA WPISÓW:
 {tekst_analizy}
 ---
-Wygeneruj gotowy artykuł (tytuł, lead, treść w HTML)."""
+Generuj artykuł."""
 
 
 def analyze_for_residents(

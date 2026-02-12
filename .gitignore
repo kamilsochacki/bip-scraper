@@ -4,6 +4,4 @@ __pycache__/
 *.pyc
 .env
 config.yaml
-bip_output.json
-*.json
 !config.example.yaml

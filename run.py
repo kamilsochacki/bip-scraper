@@ -16,6 +16,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from datetime import datetime
 
 import requests
 
@@ -58,6 +59,15 @@ def main() -> int:
         return 0
 
     print(f"Pobrano {len(entries)} wpisów z rejestrów zmian BIP.", file=sys.stderr)
+
+    # Zapisz snapshot pobranych wpisów lokalnie (timestamped), przydatne do debugowania
+    try:
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        snapshot_path = Path(f"bip_entries_{ts}.json")
+        save_payload_to_file(entries, str(snapshot_path), instruction=args.instruction)
+        print(f"Zapisano lokalny snapshot: {snapshot_path}", file=sys.stderr)
+    except Exception as e:
+        print(f"Nie udało się zapisać snapshotu: {e}", file=sys.stderr)
 
     # Tryb Ollama (Bielik): analiza → artykuł
     if args.ollama:

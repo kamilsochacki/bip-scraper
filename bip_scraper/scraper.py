@@ -12,6 +12,9 @@ import requests
 from bs4 import BeautifulSoup
 
 
+import io
+from pypdf import PdfReader
+
 @dataclass
 class BIPEntry:
     """Pojedynczy wpis z BIP (ogłoszenie / aktualność)."""
@@ -21,6 +24,7 @@ class BIPEntry:
     content: str
     published: str | None
     source_name: str
+    attachments: list[dict] = field(default_factory=list)
     raw: dict = field(default_factory=dict)
 
     def to_payload(self) -> dict:
@@ -32,6 +36,7 @@ class BIPEntry:
             "content": self.content,
             "published": self.published,
             "source_name": self.source_name,
+            "attachments": self.attachments,
         }
 
 
@@ -156,7 +161,7 @@ def fetch_rejestr_zmian(
             if not link_el:
                 continue
             href = link_el.get("href", "").strip()
-            url = _normalize_list_url(list_url, href)
+            url = _normalize_list_url(base_url, href)
             if not url or url in seen or any(x in url.lower() for x in ("javascript:", "mailto:", "#")):
                 continue
             title = (link_el.get_text() or "").strip()
@@ -197,7 +202,7 @@ def fetch_rejestr_zmian(
         if not link:
             continue
         href = link.get("href", "").strip()
-        url = _normalize_list_url(list_url, href)
+        url = _normalize_list_url(base_url, href)
         if not url or url in seen or "javascript:" in href.lower():
             continue
         title = (link.get_text() or "").strip()
@@ -228,7 +233,7 @@ def fetch_rejestr_zmian(
     if main:
         for link in main.find_all("a", href=True):
             href = link.get("href", "").strip()
-            url = _normalize_list_url(list_url, href)
+            url = _normalize_list_url(base_url, href)
             if not url or url in seen or any(x in url.lower() for x in ("javascript:", "mailto:", "#", "rejestr-zmian")):
                 continue
             title = (link.get_text() or "").strip()
@@ -292,7 +297,7 @@ def fetch_html_list(
             if not link or not link.get("href"):
                 continue
             href = link.get("href", "").strip()
-            url = _normalize_list_url(list_url, href)
+            url = _normalize_list_url(base, href)
             if not url or url in seen_urls:
                 continue
             # Odrzuć linki do samej strony, pliki PDF bez opisu itp.
@@ -358,6 +363,89 @@ def fetch_source(
     return []
 
 
+def extract_text_from_pdf(pdf_content: bytes) -> str:
+    """Wyciąga tekst z pliku PDF (używając pypdf)."""
+    try:
+        reader = PdfReader(io.BytesIO(pdf_content))
+        text_parts = []
+        for page in reader.pages:
+            extracted = page.extract_text()
+            if extracted:
+                text_parts.append(extracted)
+        return "\n".join(text_parts).strip()
+    except Exception as e:
+        return f"[Błąd odczytu PDF: {str(e)}]"
+
+
+def fetch_entry_details(
+    entry: BIPEntry,
+    timeout: int = 15,
+    user_agent: str | None = None,
+) -> None:
+    """
+    Wchodzi na stronę wpisu, szuka załączników (PDF), pobiera je i wyciąga tekst.
+    Modyfikuje obiekt entry inplace (uzupełnia pole attachments).
+    """
+    # Jeśli to link bezpośrednio do pliku (rzadkie w BIP, ale możliwe w RSS), pomijamy deep scraping
+    if entry.url.lower().endswith(".pdf"):
+        return
+
+    try:
+        resp = _fetch(entry.url, timeout=timeout, user_agent=user_agent)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.content, "html.parser")
+        base_url = entry.url
+        
+        # Szukamy linków do załączników
+        # Kryteria:
+        # 1. href kończy się na .pdf
+        # 2. treść linku zawiera "załącznik", "pobierz" itp.
+        # 3. Klasa elementu sugeruje załącznik (np. 'att-link') - opcjonalnie
+        
+        candidates = soup.find_all("a", href=True)
+        unique_links = set()
+        
+        for link_el in candidates:
+            href = link_el.get("href", "").strip()
+            text = link_el.get_text(" ", strip=True).lower()
+            
+            # Normalizacja URL
+            full_url = urljoin(base_url, href)
+            
+            is_pdf_ext = full_url.lower().endswith(".pdf")
+            is_attachment_text = any(kw in text for kw in ("załącznik", "zalacznik", "pobierz", "treść"))
+            
+            # Filtrujemy - musi być PDF lub jawnie nazwany załącznikiem (i prowadzić do pliku)
+            if not (is_pdf_ext or (is_attachment_text and "pdf" in href.lower())):
+                continue
+                
+            if full_url in unique_links:
+                continue
+            unique_links.add(full_url)
+            
+            # Pobieramy plik
+            try:
+                # Ograniczenie: pobieramy tylko PDFy
+                # head first?
+                file_resp = _fetch(full_url, timeout=timeout, user_agent=user_agent)
+                if file_resp.status_code == 200 and "application/pdf" in file_resp.headers.get("Content-Type", "").lower():
+                    raw_text = extract_text_from_pdf(file_resp.content)
+                    # Limit tekstu załącznika, żeby nie zapchać kontekstu
+                    trimmed_text = raw_text[:5000] + ("..." if len(raw_text) > 5000 else "")
+                    
+                    entry.attachments.append({
+                        "name": text or link_el.get("title") or "Załącznik",
+                        "url": full_url,
+                        "text_content": trimmed_text,
+                        "size": len(file_resp.content)
+                    })
+            except Exception as e:
+                print(f"Błąd pobierania załącznika {full_url}: {e}")
+
+    except Exception as e:
+        print(f"Błąd fetch_entry_details dla {entry.url}: {e}")
+
+
 def run_scraper(config: dict) -> list[BIPEntry]:
     """Uruchamia scraper dla wszystkich źródeł z configu."""
     sources = config.get("sources") or []
@@ -369,6 +457,15 @@ def run_scraper(config: dict) -> list[BIPEntry]:
     for src in sources:
         try:
             entries = fetch_source(src, timeout=timeout, user_agent=user_agent)
+            
+            # Dla każdego wpisu pobieramy szczegóły (załączniki)
+            print(f"Pobieranie szczegółów dla źródła {src.get('name')}... ({len(entries)} wpisów)")
+            for e in entries:
+                try:
+                    fetch_entry_details(e, timeout=timeout, user_agent=user_agent)
+                except Exception as err:
+                    print(f"Błąd pobierania szczegółów {e.url}: {err}")
+            
             all_entries.extend(entries)
         except Exception as e:
             # Loguj i idź dalej
