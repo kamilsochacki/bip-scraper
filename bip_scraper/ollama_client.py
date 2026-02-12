@@ -130,26 +130,48 @@ ANALIZA WPISÓW:
 Generuj artykuł."""
 
 
+def chunk_entries(entries: list[BIPEntry], chunk_size: int) -> list[list[BIPEntry]]:
+    """Dzieli listę wpisów na mniejsze fragmenty (batche)."""
+    return [entries[i : i + chunk_size] for i in range(0, len(entries), chunk_size)]
+
+
 def analyze_for_residents(
     entries: list[BIPEntry],
     base_url: str = "http://localhost:11434",
     model: str = "SpeakLeash/bielik-11b-v2.3-instruct:Q4_K_M",
     timeout: int = 300,
+    chunk_size: int = 5,
 ) -> str:
     """
-    Wysyła listę wpisów BIP do Bielika z prośbą o wybór tych,
-    które mogą interesować mieszkańców. Zwraca odpowiedź modelu (lista wybranych + uzasadnienia).
+    Wysyła listę wpisów BIP do Bielika w partiach (batchach),
+    aby nie przekroczyć okna kontekstowego (Map).
+    Następnie łączy wyniki (Reduce).
     """
-    tekst = entries_to_text(entries)
-    prompt = PROMPT_ANALIZA.format(tekst_wpisow=tekst)
-    return ollama_generate(
-        base_url,
-        model,
-        prompt,
-        system=SYSTEM_ANALIZA,
-        stream=False,
-        timeout=timeout,
-    )
+    batches = chunk_entries(entries, chunk_size)
+    combined_analysis = []
+    
+    print(f"Analiza w {len(batches)} częściach (po max {chunk_size} wpisów)...")
+
+    for i, batch in enumerate(batches, 1):
+        print(f"  -> Przetwarzanie części {i}/{len(batches)}...")
+        tekst = entries_to_text(batch)
+        prompt = PROMPT_ANALIZA.format(tekst_wpisow=tekst)
+        
+        try:
+            response = ollama_generate(
+                base_url,
+                model,
+                prompt,
+                system=SYSTEM_ANALIZA,
+                stream=False,
+                timeout=timeout,
+            )
+            combined_analysis.append(f"--- CZĘŚĆ {i} ---\n{response}")
+        except Exception as e:
+            print(f"Błąd analizy części {i}: {e}")
+            combined_analysis.append(f"--- CZĘŚĆ {i} (BŁĄD) ---\n")
+
+    return "\n\n".join(combined_analysis)
 
 
 def generate_wordpress_article(
